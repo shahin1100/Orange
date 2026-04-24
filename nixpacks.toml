@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["python311", "python311Packages.pip", "playwright-driver"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt", "playwright install chromium"]
+
+[phases.start]
+cmds = ["python bot.py"]
