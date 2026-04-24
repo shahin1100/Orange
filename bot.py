@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 """
 ====================================================================================================
-     ORANGE CARRIER LIVE RANGE MONITOR BOT - COMPLETE VERSION
-====================================================================================================
-এই বটটিতে:
-- 2 মিনিট, 5 মিনিট, 10 মিনিট, 2 ঘন্টার রিপোর্ট
-- কান্ট্রি সামারি সিস্টেম
-- সিঙ্গেল সার্চ (CLI বা দেশের নাম)
-- অ্যাডমিন প্যানেল (CLI যোগ/রিমুভ/ফোর্স আপডেট)
-- প্রতি নির্ধারিত সময়ে অটো আপডেট
-- রেঞ্জ নাম কপি করার সুবিধা
+     ORANGE CARRIER LIVE RANGE MONITOR BOT - RAILWAY DEPLOYMENT READY
 ====================================================================================================
 """
 
@@ -30,14 +22,14 @@ from playwright.async_api import async_playwright, Browser, Page, Playwright
 
 
 # ====================================================================================================
-#                                     কনফিগারেশন
+#                                     কনফিগারেশন (এনভায়রনমেন্ট ভেরিয়েবল থেকে)
 # ====================================================================================================
 
-BOT_TOKEN = '8797301264:AAGiRBRNGan5kHleOh319qTz4IOjtaJrIQk'
-ADMIN_ID = '7064572216'
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8797301264:AAGiRBRNGan5kHleOh319qTz4IOjtaJrIQk')
+ADMIN_ID = os.environ.get('ADMIN_ID', '7064572216')
 
-ORANGE_EMAIL = 'n.nazim1132@gmail.com'
-ORANGE_PASSWORD = 'Abcd1234'
+ORANGE_EMAIL = os.environ.get('ORANGE_EMAIL', 'n.nazim1132@gmail.com')
+ORANGE_PASSWORD = os.environ.get('ORANGE_PASSWORD', 'Abcd1234')
 
 LOGIN_URL = 'https://www.orangecarrier.com/login'
 CLI_ACCESS_URL = 'https://www.orangecarrier.com/services/cli/access'
@@ -63,7 +55,11 @@ TIME_WINDOWS = {
 }
 
 # আপডেট ইন্টারভাল
-UPDATE_INTERVAL = 60  # প্রতি ১ মিনিটে ডাটা সংগ্রহ
+UPDATE_INTERVAL = 60
+
+# ডাটা ফাইল (রেলওয়েতে persistent storage এর জন্য)
+DATA_FILE = "range_data.json"
+CLI_FILE = "cli_list.json"
 
 # লগিং
 logging.basicConfig(
@@ -79,7 +75,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RangeHitData:
-    """রেঞ্জের সম্পূর্ণ হিট ডাটা"""
     name: str
     hit_timestamps: List[datetime] = field(default_factory=list)
     cli_sources: Dict[str, int] = field(default_factory=dict)
@@ -101,14 +96,13 @@ class RangeHitData:
     def get_unique_cli_count(self) -> int:
         return len(self.cli_sources)
     
-    def cleanup(self, max_window: int = 7200):  # 2 hours
+    def cleanup(self, max_window: int = 7200):
         cutoff = datetime.now() - timedelta(seconds=max_window)
         self.hit_timestamps = [h for h in self.hit_timestamps if h > cutoff]
 
 
 @dataclass
 class WindowReport:
-    """নির্দিষ্ট সময় উইন্ডোর রিপোর্ট"""
     window_name: str
     window_seconds: int
     top_ranges: List[Tuple[str, int, datetime, int]]
@@ -135,9 +129,6 @@ next_collection: Optional[datetime] = None
 is_collecting: bool = False
 is_running: bool = True
 total_searches: int = 0
-
-DATA_FILE = "range_data.json"
-CLI_FILE = "cli_list.json"
 
 
 def log_msg(msg: str, level: str = "INFO"):
@@ -201,7 +192,6 @@ def load_cli_list():
 
 
 def extract_country_from_range(range_name: str) -> str:
-    """রেঞ্জ নাম থেকে দেশের নাম বের করে"""
     if not range_name:
         return "Unknown"
     
@@ -220,7 +210,6 @@ def extract_country_from_range(range_name: str) -> str:
 
 
 def get_country_summary(ranges: List[Tuple[str, int, int]]) -> List[Tuple[str, int, int]]:
-    """রেজাল্ট থেকে কান্ট্রি ভিত্তিক সারাংশ তৈরি করে"""
     country_data = defaultdict(lambda: {'hits': 0, 'ranges': set()})
     
     for range_name, hit_count, unique_clis in ranges:
@@ -236,12 +225,7 @@ def get_country_summary(ranges: List[Tuple[str, int, int]]) -> List[Tuple[str, i
     return summary[:15]
 
 
-# ====================================================================================================
-#                                     টাইম ও রেঞ্জ পার্সিং
-# ====================================================================================================
-
 def parse_time_string(txt: str) -> Optional[int]:
-    """টাইম স্ট্রিং থেকে সেকেন্ড বের করে"""
     if not txt:
         return None
     
@@ -266,7 +250,6 @@ def parse_time_string(txt: str) -> Optional[int]:
 
 
 def extract_range_name(txt: str) -> Optional[str]:
-    """টেক্সট থেকে রেঞ্জ নাম বের করে"""
     patterns = [
         r'([A-Z][A-Z\s]+MOBILE\s+\d+)',
         r'([A-Z][A-Z\s]+FIXED\s+\d+)',
@@ -283,7 +266,6 @@ def extract_range_name(txt: str) -> Optional[str]:
 
 
 def parse_search_results(text: str) -> List[Tuple[str, int]]:
-    """সার্চ রেজাল্ট পার্স করে"""
     results = []
     lines = text.split('\n')
     
@@ -302,7 +284,6 @@ def parse_search_results(text: str) -> List[Tuple[str, int]]:
 
 
 def get_time_ago_str(dt: datetime) -> str:
-    """সুন্দর টাইম ফরম্যাট"""
     if not dt:
         return "unknown"
     
@@ -320,34 +301,11 @@ def get_time_ago_str(dt: datetime) -> str:
         return f"{int(seconds//86400)}d ago"
 
 
-def get_full_time_ago_str(dt: datetime) -> str:
-    """পূর্ণ টাইম ফরম্যাট"""
-    if not dt:
-        return "unknown"
-    
-    now = datetime.now()
-    diff = now - dt
-    seconds = diff.total_seconds()
-    
-    if seconds < 60:
-        return f"{int(seconds)} seconds ago"
-    elif seconds < 3600:
-        minutes = int(seconds // 60)
-        return f"{minutes} minute{'s' if minutes > 1 else ''} ago"
-    elif seconds < 86400:
-        hours = int(seconds // 3600)
-        return f"{hours} hour{'s' if hours > 1 else ''} ago"
-    else:
-        days = int(seconds // 86400)
-        return f"{days} day{'s' if days > 1 else ''} ago"
-
-
 # ====================================================================================================
-#                                     ব্রাউজার ফাংশন
+#                                     ব্রাউজার ফাংশন (হেডলেস মোড)
 # ====================================================================================================
 
 async def close_popups():
-    """সব পপআপ বন্ধ করে"""
     try:
         btns = await page.query_selector_all('button')
         for btn in btns:
@@ -362,12 +320,11 @@ async def close_popups():
 
 
 async def login() -> bool:
-    """লগইন করে"""
     log_msg("Logging in...")
     
     for attempt in range(3):
         try:
-            await page.goto(LOGIN_URL, wait_until='networkidle', timeout=30000)
+            await page.goto(LOGIN_URL, wait_until='networkidle', timeout=60000)
             await asyncio.sleep(2)
             await close_popups()
             
@@ -398,7 +355,7 @@ async def login() -> bool:
             await asyncio.sleep(5)
             await close_popups()
             
-            await page.goto(CLI_ACCESS_URL, wait_until='networkidle', timeout=30000)
+            await page.goto(CLI_ACCESS_URL, wait_until='networkidle', timeout=60000)
             await asyncio.sleep(3)
             await close_popups()
             
@@ -407,13 +364,12 @@ async def login() -> bool:
             
         except Exception as e:
             log_msg(f"Login attempt {attempt+1} failed: {e}", "WARNING")
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
     
     return False
 
 
 async def find_search_box():
-    """সার্চ বক্স খুঁজে বের করে"""
     selectors = [
         'input[type="search"]',
         'input[placeholder*="Search"]',
@@ -435,7 +391,6 @@ async def find_search_box():
 
 
 async def search_cli(cli: str) -> List[Tuple[str, int]]:
-    """একটি CLI সার্চ করে"""
     try:
         box = await find_search_box()
         if not box:
@@ -458,7 +413,6 @@ async def search_cli(cli: str) -> List[Tuple[str, int]]:
 
 
 async def collect_all_data():
-    """সব ডাটা সংগ্রহ করে"""
     global range_data, last_data_collection, next_collection, is_collecting, total_searches
     
     if is_collecting:
@@ -469,7 +423,7 @@ async def collect_all_data():
     start = datetime.now()
     
     try:
-        await page.reload(wait_until='networkidle', timeout=20000)
+        await page.reload(wait_until='networkidle', timeout=30000)
         await asyncio.sleep(2)
         await close_popups()
         
@@ -487,7 +441,6 @@ async def collect_all_data():
             
             await asyncio.sleep(0.3)
         
-        # পুরানো ডাটা ক্লিয়ার (2 ঘন্টা)
         for rng in list(range_data.keys()):
             range_data[rng].cleanup(max_window=2*3600)
             if not range_data[rng].hit_timestamps:
@@ -511,7 +464,6 @@ async def collect_all_data():
 
 
 def update_all_reports():
-    """সব রিপোর্ট আপডেট করে"""
     global reports
     
     now = datetime.now()
@@ -572,7 +524,6 @@ def format_window_name(seconds: int) -> str:
 
 
 def get_report_for_window(window_name: str) -> str:
-    """নির্দিষ্ট সময় উইন্ডোর রিপোর্ট তৈরি করে (কান্ট্রি সামারি সহ)"""
     if window_name not in reports:
         return f"⏳ First data collection in progress, please wait..."
     
@@ -590,7 +541,6 @@ def get_report_for_window(window_name: str) -> str:
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
     
-    # কান্ট্রি সামারি তৈরি
     country_summary = get_country_summary([(name, cnt, unique_clis) for name, cnt, _, unique_clis in report_data.top_ranges])
     
     report = (
@@ -602,7 +552,6 @@ def get_report_for_window(window_name: str) -> str:
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
     
-    # কান্ট্রি সামারি সেকশন
     if country_summary:
         report += f"📊 COUNTRY SUMMARY 📊\n"
         report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -610,7 +559,6 @@ def get_report_for_window(window_name: str) -> str:
             report += f"{i}. {country} | {hits} hits | {ranges_count} ranges\n"
         report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     
-    # টপ রেঞ্জ সেকশন
     report += f"🔥 TOP 20 RANGES 🔥\n"
     report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     
@@ -636,24 +584,16 @@ def get_report_for_window(window_name: str) -> str:
 # ====================================================================================================
 
 async def single_search(query: str) -> Tuple[str, str]:
-    """
-    একটি ক্লি বা দেশের নাম সার্চ করে
-    রিটার্ন করে: (5min_result, total_result)
-    """
     if not last_data_collection:
         return ("⏳ Data collection in progress, please wait...", "⏳ Data collection in progress, please wait...")
     
     query_lower = query.lower().strip()
-    now = datetime.now()
     
-    # 5 মিনিটের রেজাল্ট
     five_min_ranges = []
-    # টোটাল রেজাল্ট (শেষ 2 ঘন্টা)
     total_ranges = []
     
     for name, data in range_data.items():
         if query_lower in name.lower():
-            # 5 মিনিট
             cnt_5min = data.get_hits_in_window(300)
             if cnt_5min > 0:
                 last = data.get_last_hit_in_window(300)
@@ -661,7 +601,6 @@ async def single_search(query: str) -> Tuple[str, str]:
                     unique_clis = data.get_unique_cli_count()
                     five_min_ranges.append((name, cnt_5min, last, unique_clis))
             
-            # টোটাল (শেষ 2 ঘন্টা)
             cnt_total = data.get_hits_in_window(7200)
             if cnt_total > 0:
                 last = data.get_last_hit_in_window(7200)
@@ -675,7 +614,7 @@ async def single_search(query: str) -> Tuple[str, str]:
     top_5min = five_min_ranges[:20]
     top_total = total_ranges[:20]
     
-    # 5 মিনিট রিপোর্ট with country summary
+    # 5 MIN REPORT
     if not top_5min:
         five_min_report = f"🔍 SEARCH: {query}\n━━━━━━━━━━━━━━━━━━━━\n📭 No results found in last 5 minutes"
     else:
@@ -707,7 +646,7 @@ async def single_search(query: str) -> Tuple[str, str]:
         five_min_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         five_min_report += f"💡 Tap any range name to copy it"
     
-    # টোটাল রিপোর্ট with country summary
+    # 2 HOURS REPORT
     if not top_total:
         total_report = f"🔍 SEARCH: {query}\n━━━━━━━━━━━━━━━━━━━━\n📭 No results found in last 2 hours"
     else:
@@ -747,8 +686,6 @@ async def single_search(query: str) -> Tuple[str, str]:
 # ====================================================================================================
 
 def get_statistics() -> str:
-    """পরিসংখ্যান রিপোর্ট"""
-    now = datetime.now()
     cd = get_countdown()
     
     active_2min = sum(1 for d in range_data.values() if d.get_hits_in_window(120) > 0)
@@ -824,7 +761,6 @@ def get_help_text() -> str:
 # ====================================================================================================
 
 def get_main_menu():
-    """মেইন মেনু - CLI LIST সরিয়ে 2 HOURS RESULT যোগ করা হয়েছে"""
     keyboard = [
         [KeyboardButton("🟢 ACTIVE RANGE (2 MIN)")],
         [KeyboardButton("📊 5 MIN REPORT"), KeyboardButton("📊 10 MIN REPORT")],
@@ -836,7 +772,6 @@ def get_main_menu():
 
 
 def get_search_menu(query: str):
-    """সার্চ রেজাল্ট মেনু"""
     keyboard = [
         [KeyboardButton(f"📊 5 MIN RESULT - {query}")],
         [KeyboardButton(f"📊 2 HOURS RESULT - {query}")],
@@ -846,7 +781,6 @@ def get_search_menu(query: str):
 
 
 def get_admin_menu():
-    """অ্যাডমিন মেনু"""
     keyboard = [
         [KeyboardButton("➕ ADD CLI"), KeyboardButton("➖ REMOVE CLI")],
         [KeyboardButton("📋 VIEW ALL CLIS"), KeyboardButton("🔄 FORCE UPDATE")],
@@ -897,7 +831,6 @@ async def auto_collection_loop():
 # ====================================================================================================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/start কমান্ড - বট রিস্টার্ট + স্বাগতম + ম্যানুয়াল"""
     user_name = update.effective_user.first_name or "User"
     
     welcome_msg = (
@@ -941,7 +874,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = str(update.effective_user.id)
     
-    # awaiting states
     if context.user_data.get('awaiting_search'):
         context.user_data['awaiting_search'] = False
         query = text.strip()
@@ -953,7 +885,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Admin ADD CLI - শুধু admin চেক করে কোন awaiting_add স্টেট ছাড়া সরাসরি
     if text == "➕ ADD CLI" and is_admin(user_id):
         context.user_data['awaiting_add'] = True
         await update.message.reply_text(
@@ -963,7 +894,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Admin REMOVE CLI - শুধু admin চেক করে কোন awaiting_remove স্টেট ছাড়া সরাসরি
     if text == "➖ REMOVE CLI" and is_admin(user_id):
         context.user_data['awaiting_remove'] = True
         await update.message.reply_text(
@@ -976,28 +906,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_add'):
         context.user_data['awaiting_add'] = False
         if is_admin(user_id):
-            if text not in UNIQUE_CLI:
-                UNIQUE_CLI.append(text)
+            cli_num = text.strip()
+            if cli_num not in UNIQUE_CLI:
+                UNIQUE_CLI.append(cli_num)
                 UNIQUE_CLI.sort()
                 save_cli_list()
-                await update.message.reply_text(f"✅ CLI {text} added!\nTotal: {len(UNIQUE_CLI)}", reply_markup=get_admin_menu())
+                await update.message.reply_text(f"✅ CLI {cli_num} added!\nTotal: {len(UNIQUE_CLI)}", reply_markup=get_admin_menu())
             else:
-                await update.message.reply_text(f"⚠️ CLI {text} already exists!", reply_markup=get_admin_menu())
+                await update.message.reply_text(f"⚠️ CLI {cli_num} already exists!", reply_markup=get_admin_menu())
         return
     
     if context.user_data.get('awaiting_remove'):
         context.user_data['awaiting_remove'] = False
         if is_admin(user_id):
-            if text in UNIQUE_CLI:
-                UNIQUE_CLI.remove(text)
+            cli_num = text.strip()
+            if cli_num in UNIQUE_CLI:
+                UNIQUE_CLI.remove(cli_num)
                 UNIQUE_CLI.sort()
                 save_cli_list()
-                await update.message.reply_text(f"✅ CLI {text} removed!\nTotal: {len(UNIQUE_CLI)}", reply_markup=get_admin_menu())
+                await update.message.reply_text(f"✅ CLI {cli_num} removed!\nTotal: {len(UNIQUE_CLI)}", reply_markup=get_admin_menu())
             else:
-                await update.message.reply_text(f"⚠️ CLI {text} not found!", reply_markup=get_admin_menu())
+                await update.message.reply_text(f"⚠️ CLI {cli_num} not found!", reply_markup=get_admin_menu())
         return
     
-    # MAIN MENU BUTTONS
     if text == "🟢 ACTIVE RANGE (2 MIN)":
         await update.message.reply_text("⏳ Fetching 2 minutes report...")
         result = get_report_for_window('2min')
@@ -1047,7 +978,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "🔙 BACK TO MAIN":
         await update.message.reply_text("Main Menu:", reply_markup=get_main_menu())
     
-    # SEARCH RESULT BUTTONS
     elif text.startswith("📊 5 MIN RESULT - "):
         query = text.replace("📊 5 MIN RESULT - ", "").strip()
         await update.message.reply_text(f"⏳ Fetching 5 minutes result for {query}...")
@@ -1060,7 +990,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, total = await single_search(query)
         await update.message.reply_text(total, parse_mode='Markdown', reply_markup=get_search_menu(query))
     
-    # ADMIN BUTTONS
     elif text == "🔄 FORCE UPDATE":
         if is_admin(user_id):
             await update.message.reply_text("🔄 Force updating data...")
@@ -1080,21 +1009,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ====================================================================================================
-#                                     ব্রাউজার সেটআপ
+#                                     ব্রাউজার সেটআপ (হেডলেস মোড)
 # ====================================================================================================
 
 async def init_browser():
     global playwright, browser, page
     
-    log_msg("🚀 Starting Chrome browser...")
+    log_msg("🚀 Starting Chrome browser (headless mode)...")
     
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(
-        headless=False,
-        args=['--start-maximized', '--no-sandbox']
+        headless=True,
+        args=[
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--disable-gpu'
+        ]
     )
     
-    context = await browser.new_context(viewport={'width': 1280, 'height': 720})
+    context = await browser.new_context(
+        viewport={'width': 1280, 'height': 720},
+        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    )
     page = await context.new_page()
     
     log_msg("✅ Browser started")
@@ -1109,7 +1047,7 @@ async def main():
     global application, is_running
     
     print("\n" + "=" * 70)
-    print("🔥 ORANGE CARRIER RANGE MONITOR BOT - COMPLETE VERSION")
+    print("🔥 ORANGE CARRIER RANGE MONITOR BOT - RAILWAY DEPLOYMENT")
     print("=" * 70)
     print(f"📧 Email: {ORANGE_EMAIL}")
     print(f"📋 Total CLIs: {len(UNIQUE_CLI)}")
@@ -1120,32 +1058,27 @@ async def main():
     print(f"🔄 Data collection: Every {UPDATE_INTERVAL} seconds")
     print("=" * 70 + "\n")
     
-    # লোড ডাটা
     load_data()
     load_cli_list()
     
-    # ব্রাউজার
     if not await init_browser():
         log_msg("Browser failed!", "ERROR")
         return
     
-    # লগইন
     login_ok = False
     for i in range(3):
         log_msg(f"Login {i+1}/3...")
         if await login():
             login_ok = True
             break
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)
     
     if not login_ok:
         log_msg("Login failed!", "ERROR")
-        await send_msg("❌ Login failed! Please check credentials.")
         return
     
     log_msg("✅ Ready!")
     
-    # টেলিগ্রাম বট
     application = Application.builder().token(BOT_TOKEN).build()
     
     application.add_handler(CommandHandler("start", cmd_start))
@@ -1161,18 +1094,6 @@ async def main():
     
     log_msg("✅ Telegram bot ONLINE!")
     
-    await send_msg(
-        "✅ ORANGE CLI BOT ONLINE!\n\n"
-        f"📋 CLIs: {len(UNIQUE_CLI)}\n"
-        f"⏱️ Windows: 2min, 5min, 10min, 2hours\n"
-        f"📊 Country Summary: ENABLED\n"
-        f"📋 Copy Range: Tap any range name to copy\n"
-        f"🔄 Data collection: Every {UPDATE_INTERVAL} seconds\n\n"
-        "Type /start to see the menu",
-        get_main_menu()
-    )
-    
-    # অটো কালেকশন শুরু
     asyncio.create_task(auto_collection_loop())
     
     try:
