@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
 ====================================================================================================
-     ORANGE CARRIER LIVE RANGE MONITOR BOT - COMPLETE WORKING VERSION (5000+ LINES)
+     ORANGE CARRIER LIVE RANGE MONITOR BOT - COMPLETE VERSION
 ====================================================================================================
-এই বটটি সম্পূর্ণরূপে কাজ করে:
-- 2 মিনিট, 5 মিনিট, 10 মিনিটের রিপোর্ট
-- SINGLE SEARCH (CLI বা দেশের নাম)
+এই বটটিতে:
+- 2 মিনিট, 5 মিনিট, 10 মিনিট, 2 ঘন্টার রিপোর্ট
+- কান্ট্রি সামারি সিস্টেম
+- সিঙ্গেল সার্চ (CLI বা দেশের নাম)
 - অ্যাডমিন প্যানেল (CLI যোগ/রিমুভ/ফোর্স আপডেট)
-- /start কমান্ড (বট রিস্টার্ট + স্বাগতম + ম্যানুয়াল)
 - প্রতি নির্ধারিত সময়ে অটো আপডেট
+- রেঞ্জ নাম কপি করার সুবিধা
 ====================================================================================================
 """
 
@@ -29,9 +30,7 @@ from playwright.async_api import async_playwright, Browser, Page, Playwright
 
 
 # ====================================================================================================
-# ====================================================================================================
-#                                    第一部分: কনফিগারেশন
-# ====================================================================================================
+#                                     কনফিগারেশন
 # ====================================================================================================
 
 BOT_TOKEN = '8797301264:AAGiRBRNGan5kHleOh319qTz4IOjtaJrIQk'
@@ -59,7 +58,8 @@ UNIQUE_CLI.sort()
 TIME_WINDOWS = {
     '2min': 120,
     '5min': 300,
-    '10min': 600
+    '10min': 600,
+    '2hours': 7200
 }
 
 # আপডেট ইন্টারভাল
@@ -74,9 +74,7 @@ logger = logging.getLogger(__name__)
 
 
 # ====================================================================================================
-# ====================================================================================================
-#                                    第二部分: ডাটা স্ট্রাকচার
-# ====================================================================================================
+#                                     ডাটা স্ট্রাকচার
 # ====================================================================================================
 
 @dataclass
@@ -84,9 +82,12 @@ class RangeHitData:
     """রেঞ্জের সম্পূর্ণ হিট ডাটা"""
     name: str
     hit_timestamps: List[datetime] = field(default_factory=list)
+    cli_sources: Dict[str, int] = field(default_factory=dict)
     
-    def add_hit(self, hit_time: datetime):
+    def add_hit(self, hit_time: datetime, cli: str = None):
         self.hit_timestamps.append(hit_time)
+        if cli:
+            self.cli_sources[cli] = self.cli_sources.get(cli, 0) + 1
     
     def get_hits_in_window(self, window_seconds: int) -> int:
         cutoff = datetime.now() - timedelta(seconds=window_seconds)
@@ -97,8 +98,8 @@ class RangeHitData:
         recent = [h for h in self.hit_timestamps if h > cutoff]
         return max(recent) if recent else None
     
-    def get_all_hits(self) -> List[datetime]:
-        return self.hit_timestamps
+    def get_unique_cli_count(self) -> int:
+        return len(self.cli_sources)
     
     def cleanup(self, max_window: int = 7200):  # 2 hours
         cutoff = datetime.now() - timedelta(seconds=max_window)
@@ -110,7 +111,7 @@ class WindowReport:
     """নির্দিষ্ট সময় উইন্ডোর রিপোর্ট"""
     window_name: str
     window_seconds: int
-    top_ranges: List[Tuple[str, int, datetime]]
+    top_ranges: List[Tuple[str, int, datetime, int]]
     total_hits: int
     total_ranges: int
     last_update: datetime
@@ -118,9 +119,7 @@ class WindowReport:
 
 
 # ====================================================================================================
-# ====================================================================================================
-#                                    第三部分: গ্লোবাল ভেরিয়েবল
-# ====================================================================================================
+#                                     গ্লোবাল ভেরিয়েবল
 # ====================================================================================================
 
 playwright: Optional[Playwright] = None
@@ -156,7 +155,10 @@ def save_data():
     try:
         data = {}
         for name, rd in range_data.items():
-            data[name] = [h.isoformat() for h in rd.hit_timestamps]
+            data[name] = {
+                'timestamps': [h.isoformat() for h in rd.hit_timestamps],
+                'clis': rd.cli_sources
+            }
         with open(DATA_FILE, 'w') as f:
             json.dump(data, f)
     except Exception as e:
@@ -169,9 +171,10 @@ def load_data():
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, 'r') as f:
                 data = json.load(f)
-            for name, timestamps in data.items():
+            for name, info in data.items():
                 rd = RangeHitData(name=name)
-                rd.hit_timestamps = [datetime.fromisoformat(t) for t in timestamps]
+                rd.hit_timestamps = [datetime.fromisoformat(t) for t in info.get('timestamps', [])]
+                rd.cli_sources = info.get('clis', {})
                 range_data[name] = rd
             log_msg(f"Loaded {len(range_data)} ranges")
     except Exception as e:
@@ -197,10 +200,44 @@ def load_cli_list():
         log_msg(f"CLI load error: {e}", "WARNING")
 
 
+def extract_country_from_range(range_name: str) -> str:
+    """রেঞ্জ নাম থেকে দেশের নাম বের করে"""
+    if not range_name:
+        return "Unknown"
+    
+    patterns = [
+        r'^(.+?)\s+(?:MOBILE|FIXED|IPRN)',
+        r'^(.+?)\s+\d+$',
+    ]
+    
+    for pattern in patterns:
+        m = re.search(pattern, range_name, re.IGNORECASE)
+        if m:
+            country = m.group(1).strip()
+            return country
+    
+    return range_name.split()[0] if range_name.split() else "Unknown"
+
+
+def get_country_summary(ranges: List[Tuple[str, int, int]]) -> List[Tuple[str, int, int]]:
+    """রেজাল্ট থেকে কান্ট্রি ভিত্তিক সারাংশ তৈরি করে"""
+    country_data = defaultdict(lambda: {'hits': 0, 'ranges': set()})
+    
+    for range_name, hit_count, unique_clis in ranges:
+        country = extract_country_from_range(range_name)
+        country_data[country]['hits'] += hit_count
+        country_data[country]['ranges'].add(range_name)
+    
+    summary = []
+    for country, data in country_data.items():
+        summary.append((country, data['hits'], len(data['ranges'])))
+    
+    summary.sort(key=lambda x: x[1], reverse=True)
+    return summary[:15]
+
+
 # ====================================================================================================
-# ====================================================================================================
-#                                    第四部分: টাইম ও রেঞ্জ পার্সিং
-# ====================================================================================================
+#                                     টাইম ও রেঞ্জ পার্সিং
 # ====================================================================================================
 
 def parse_time_string(txt: str) -> Optional[int]:
@@ -306,9 +343,7 @@ def get_full_time_ago_str(dt: datetime) -> str:
 
 
 # ====================================================================================================
-# ====================================================================================================
-#                                    第五部分: ব্রাউজার ফাংশন
-# ====================================================================================================
+#                                     ব্রাউজার ফাংশন
 # ====================================================================================================
 
 async def close_popups():
@@ -438,26 +473,19 @@ async def collect_all_data():
         await asyncio.sleep(2)
         await close_popups()
         
-        all_hits = []
-        for i, cli in enumerate(UNIQUE_CLI):
-            hits = await search_cli(cli)
-            all_hits.extend(hits)
-            total_searches += 1
-            
-            if (i + 1) % 10 == 0:
-                log_msg(f"Progress: {i+1}/{len(UNIQUE_CLI)}")
-            
-            await asyncio.sleep(0.5)
-        
-        log_msg(f"Collected {len(all_hits)} hits")
-        
         now = datetime.now()
         
-        for rng, sec in all_hits:
-            hit_time = now - timedelta(seconds=sec)
-            if rng not in range_data:
-                range_data[rng] = RangeHitData(name=rng)
-            range_data[rng].add_hit(hit_time)
+        for cli in UNIQUE_CLI:
+            hits = await search_cli(cli)
+            total_searches += 1
+            
+            for rng, sec in hits:
+                hit_time = now - timedelta(seconds=sec)
+                if rng not in range_data:
+                    range_data[rng] = RangeHitData(name=rng)
+                range_data[rng].add_hit(hit_time, cli)
+            
+            await asyncio.sleep(0.3)
         
         # পুরানো ডাটা ক্লিয়ার (2 ঘন্টা)
         for rng in list(range_data.keys()):
@@ -497,7 +525,8 @@ def update_all_reports():
             if cnt > 0:
                 last_hit = data.get_last_hit_in_window(seconds)
                 if last_hit:
-                    top_ranges.append((rng, cnt, last_hit))
+                    unique_clis = data.get_unique_cli_count()
+                    top_ranges.append((rng, cnt, last_hit, unique_clis))
                     total_hits += cnt
         
         top_ranges.sort(key=lambda x: x[1], reverse=True)
@@ -537,16 +566,17 @@ def format_window_name(seconds: int) -> str:
         return "5 Minutes"
     elif seconds == 600:
         return "10 Minutes"
+    elif seconds == 7200:
+        return "2 Hours"
     return f"{seconds//60} Minutes"
 
 
 def get_report_for_window(window_name: str) -> str:
-    """নির্দিষ্ট সময় উইন্ডোর রিপোর্ট তৈরি করে"""
+    """নির্দিষ্ট সময় উইন্ডোর রিপোর্ট তৈরি করে (কান্ট্রি সামারি সহ)"""
     if window_name not in reports:
         return f"⏳ First data collection in progress, please wait..."
     
     report_data = reports[window_name]
-    now = datetime.now()
     cd = get_countdown()
     
     if not report_data.top_ranges:
@@ -554,41 +584,55 @@ def get_report_for_window(window_name: str) -> str:
             f"📡 {format_window_name(report_data.window_seconds)} REPORT\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📭 No active ranges found\n"
-            f"⏱️ Window: Last {report_data.window_seconds//60} minutes\n"
+            f"⏱️ Window: Last {format_window_name(report_data.window_seconds)}\n"
             f"🕐 Last update: {report_data.last_update.strftime('%H:%M:%S')}\n"
-            f"🔄 Next data in: {cd}\n"
+            f"🔄 Next update in: {cd}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
+    
+    # কান্ট্রি সামারি তৈরি
+    country_summary = get_country_summary([(name, cnt, unique_clis) for name, cnt, _, unique_clis in report_data.top_ranges])
     
     report = (
         f"🔥 {format_window_name(report_data.window_seconds)} REPORT 🔥\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🕐 Time: {report_data.last_update.strftime('%H:%M:%S')}\n"
-        f"⏱️ Window: Last {report_data.window_seconds//60} minutes\n"
+        f"⏱️ Window: Last {format_window_name(report_data.window_seconds)}\n"
         f"📊 Active Ranges: {report_data.total_ranges}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
     
-    for i, (name, cnt, last) in enumerate(report_data.top_ranges, 1):
-        report += f"<b>{i}. {name}</b>\n"
-        report += f"   📊 {cnt} hits | ⏱️ {get_time_ago_str(last)}\n"
+    # কান্ট্রি সামারি সেকশন
+    if country_summary:
+        report += f"📊 COUNTRY SUMMARY 📊\n"
+        report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        for i, (country, hits, ranges_count) in enumerate(country_summary, 1):
+            report += f"{i}. {country} | {hits} hits | {ranges_count} ranges\n"
+        report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    # টপ রেঞ্জ সেকশন
+    report += f"🔥 TOP 20 RANGES 🔥\n"
+    report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    for i, (name, cnt, last, unique_clis) in enumerate(report_data.top_ranges, 1):
+        report += f"{i}. `{name}`\n"
+        report += f"   📊 {cnt} hits | {unique_clis} CLI | ⏱️ {get_time_ago_str(last)}\n"
         report += f"   ────────────────────\n"
     
-    total = sum(c for _, c, _ in report_data.top_ranges)
+    total = sum(c for _, c, _, _ in report_data.top_ranges)
     report += (
         f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 Total Hits: {total}\n"
-        f"🔄 Next data in: <b>{cd}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        f"🔄 Next update in: {cd}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 Tap any range name to copy it"
     )
     
     return report
 
 
 # ====================================================================================================
-# ====================================================================================================
-#                                    第六部分: SINGLE SEARCH ফাংশন
-# ====================================================================================================
+#                                     সিঙ্গেল সার্চ ফাংশন
 # ====================================================================================================
 
 async def single_search(query: str) -> Tuple[str, str]:
@@ -599,7 +643,7 @@ async def single_search(query: str) -> Tuple[str, str]:
     if not last_data_collection:
         return ("⏳ Data collection in progress, please wait...", "⏳ Data collection in progress, please wait...")
     
-    query_upper = query.upper().strip()
+    query_lower = query.lower().strip()
     now = datetime.now()
     
     # 5 মিনিটের রেজাল্ট
@@ -608,48 +652,98 @@ async def single_search(query: str) -> Tuple[str, str]:
     total_ranges = []
     
     for name, data in range_data.items():
-        if query_upper in name.upper() or name.endswith(query_upper):
+        if query_lower in name.lower():
             # 5 মিনিট
             cnt_5min = data.get_hits_in_window(300)
             if cnt_5min > 0:
                 last = data.get_last_hit_in_window(300)
                 if last:
-                    five_min_ranges.append((name, cnt_5min, last))
+                    unique_clis = data.get_unique_cli_count()
+                    five_min_ranges.append((name, cnt_5min, last, unique_clis))
             
             # টোটাল (শেষ 2 ঘন্টা)
-            all_hits = data.get_all_hits()
-            if all_hits:
-                total_ranges.append((name, len(all_hits), max(all_hits)))
+            cnt_total = data.get_hits_in_window(7200)
+            if cnt_total > 0:
+                last = data.get_last_hit_in_window(7200)
+                if last:
+                    unique_clis = data.get_unique_cli_count()
+                    total_ranges.append((name, cnt_total, last, unique_clis))
     
     five_min_ranges.sort(key=lambda x: x[1], reverse=True)
     total_ranges.sort(key=lambda x: x[1], reverse=True)
     
-    top_5min = five_min_ranges[:15]
-    top_total = total_ranges[:15]
+    top_5min = five_min_ranges[:20]
+    top_total = total_ranges[:20]
     
-    # 5 মিনিট রিপোর্ট
+    # 5 মিনিট রিপোর্ট with country summary
     if not top_5min:
         five_min_report = f"🔍 SEARCH: {query}\n━━━━━━━━━━━━━━━━━━━━\n📭 No results found in last 5 minutes"
     else:
-        five_min_report = f"🔍 {query} — 5 MIN RESULTS 🔍\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n⏱️ Window: Last 5 minutes\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        for i, (name, cnt, last) in enumerate(top_5min, 1):
-            five_min_report += f"{i}. {name}\n   📊 {cnt} hits | ⏱️ {get_time_ago_str(last)}\n   ────────────────────\n"
+        country_summary_5min = get_country_summary([(name, cnt, unique_clis) for name, cnt, _, unique_clis in top_5min])
+        
+        five_min_report = f"🔍 {query} — 5 MIN RESULTS 🔍\n"
+        five_min_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        five_min_report += f"⏱️ Window: Last 5 minutes\n"
+        five_min_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        if country_summary_5min:
+            five_min_report += f"📊 COUNTRY SUMMARY 📊\n"
+            five_min_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            for i, (country, hits, ranges_count) in enumerate(country_summary_5min, 1):
+                five_min_report += f"{i}. {country} | {hits} hits | {ranges_count} ranges\n"
+            five_min_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        five_min_report += f"🔥 TOP 20 RANGES 🔥\n"
+        five_min_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for i, (name, cnt, last, unique_clis) in enumerate(top_5min, 1):
+            five_min_report += f"{i}. `{name}`\n"
+            five_min_report += f"   📊 {cnt} hits | {unique_clis} CLI | ⏱️ {get_time_ago_str(last)}\n"
+            five_min_report += f"   ────────────────────\n"
+        
+        total_hits = sum(c for _, c, _, _ in top_5min)
+        five_min_report += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        five_min_report += f"📈 Total Hits: {total_hits}\n"
+        five_min_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        five_min_report += f"💡 Tap any range name to copy it"
     
-    # টোটাল রিপোর্ট
+    # টোটাল রিপোর্ট with country summary
     if not top_total:
         total_report = f"🔍 SEARCH: {query}\n━━━━━━━━━━━━━━━━━━━━\n📭 No results found in last 2 hours"
     else:
-        total_report = f"🔍 {query} — TOTAL RESULTS (2H) 🔍\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n⏱️ Window: Last 2 hours\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        for i, (name, cnt, last) in enumerate(top_total, 1):
-            total_report += f"{i}. {name}\n   📊 {cnt} total hits | ⏱️ Last: {get_full_time_ago_str(last)}\n   ────────────────────\n"
+        country_summary_total = get_country_summary([(name, cnt, unique_clis) for name, cnt, _, unique_clis in top_total])
+        
+        total_report = f"🔍 {query} — 2 HOURS RESULTS 🔍\n"
+        total_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        total_report += f"⏱️ Window: Last 2 hours\n"
+        total_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        if country_summary_total:
+            total_report += f"📊 COUNTRY SUMMARY 📊\n"
+            total_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            for i, (country, hits, ranges_count) in enumerate(country_summary_total, 1):
+                total_report += f"{i}. {country} | {hits} hits | {ranges_count} ranges\n"
+            total_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        total_report += f"🔥 TOP 20 RANGES 🔥\n"
+        total_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for i, (name, cnt, last, unique_clis) in enumerate(top_total, 1):
+            total_report += f"{i}. `{name}`\n"
+            total_report += f"   📊 {cnt} hits | {unique_clis} CLI | ⏱️ {get_time_ago_str(last)}\n"
+            total_report += f"   ────────────────────\n"
+        
+        total_hits = sum(c for _, c, _, _ in top_total)
+        total_report += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        total_report += f"📈 Total Hits: {total_hits}\n"
+        total_report += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        total_report += f"💡 Tap any range name to copy it"
     
     return five_min_report, total_report
 
 
 # ====================================================================================================
-# ====================================================================================================
-#                                    第七部分: পরিসংখ্যান ও হেল্প
-# ====================================================================================================
+#                                     পরিসংখ্যান ও হেল্প
 # ====================================================================================================
 
 def get_statistics() -> str:
@@ -660,6 +754,7 @@ def get_statistics() -> str:
     active_2min = sum(1 for d in range_data.values() if d.get_hits_in_window(120) > 0)
     active_5min = sum(1 for d in range_data.values() if d.get_hits_in_window(300) > 0)
     active_10min = sum(1 for d in range_data.values() if d.get_hits_in_window(600) > 0)
+    active_2hours = sum(1 for d in range_data.values() if d.get_hits_in_window(7200) > 0)
     
     stats = (
         f"📊 STATISTICS\n"
@@ -672,6 +767,7 @@ def get_statistics() -> str:
         f"• 2 Minutes: {active_2min}\n"
         f"• 5 Minutes: {active_5min}\n"
         f"• 10 Minutes: {active_10min}\n"
+        f"• 2 Hours: {active_2hours}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🕐 Last collection: {last_data_collection.strftime('%H:%M:%S') if last_data_collection else 'Never'}\n"
         f"🔄 Next collection in: {cd}\n"
@@ -680,6 +776,7 @@ def get_statistics() -> str:
         f"• 2 Minutes Window\n"
         f"• 5 Minutes Window\n"
         f"• 10 Minutes Window\n"
+        f"• 2 Hours Window\n"
         f"• SINGLE SEARCH (CLI or Country)"
     )
     
@@ -699,51 +796,40 @@ def get_help_text() -> str:
         f"🆘 HELP & SUPPORT\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📌 <b>AVAILABLE BUTTONS:</b>\n"
-        f"• <b>🟢 ACTIVE RANGE (2 MIN)</b> - Last 2 minutes\n"
-        f"• <b>📊 5 MIN REPORT</b> - Last 5 minutes\n"
-        f"• <b>📊 10 MIN REPORT</b> - Last 10 minutes\n"
+        f"• <b>🟢 ACTIVE RANGE (2 MIN)</b> - Last 2 minutes report\n"
+        f"• <b>📊 5 MIN REPORT</b> - Last 5 minutes report\n"
+        f"• <b>📊 10 MIN REPORT</b> - Last 10 minutes report\n"
+        f"• <b>📊 2 HOURS RESULT</b> - Last 2 hours report\n"
         f"• <b>🔍 SINGLE SEARCH</b> - Search CLI or Country\n"
         f"• <b>📈 STATISTICS</b> - Bot statistics\n"
-        f"• <b>📋 CLI LIST</b> - Your CLI list\n"
         f"• <b>👑 ADMIN PANEL</b> - Admin features\n\n"
-        f"📌 <b>HOW TO USE SINGLE SEARCH:</b>\n"
-        f"1. Click SINGLE SEARCH button\n"
-        f"2. Send CLI number OR Country name\n"
-        f"3. Choose '5 MIN RESULT' or 'TOTAL RESULT'\n\n"
+        f"📌 <b>SINGLE SEARCH GUIDE:</b>\n"
+        f"1. Click <b>🔍 SINGLE SEARCH</b>\n"
+        f"2. Send CLI number (e.g., 5731) OR Country name (e.g., CAMBODIA)\n"
+        f"3. Select <b>5 MIN RESULT</b> or <b>2 HOURS RESULT</b>\n\n"
+        f"📌 <b>FEATURES:</b>\n"
+        f"• Country summary with hit counts\n"
+        f"• CLI count per range\n"
+        f"• Tap any range name to copy\n\n"
         f"📌 <b>COMMANDS:</b>\n"
         f"• /start - Restart bot and show menu\n\n"
         f"👑 <b>Admin ID:</b> {ADMIN_ID}\n"
-        f"🤖 <b>Status:</b> 🟢 Online"
+        f"🤖 <b>Status:</b> 🟢 Online\n"
+        f"🔄 <b>Update Interval:</b> Every 60 seconds"
     )
 
 
 # ====================================================================================================
-# ====================================================================================================
-#                                    第八部分: টেলিগ্রাম মেনু (Custom Layout)
-# ====================================================================================================
+#                                     টেলিগ্রাম মেনু
 # ====================================================================================================
 
 def get_main_menu():
-    """মেইন মেনু - আপনার ডিজাইন অনুযায়ী"""
+    """মেইন মেনু - CLI LIST সরিয়ে 2 HOURS RESULT যোগ করা হয়েছে"""
     keyboard = [
-        # Top single button
         [KeyboardButton("🟢 ACTIVE RANGE (2 MIN)")],
-        # Row 2
-        [
-            KeyboardButton("📊 5 MIN REPORT"),
-            KeyboardButton("📊 10 MIN REPORT")
-        ],
-        # Row 3
-        [
-            KeyboardButton("🔍 SINGLE SEARCH"),
-            KeyboardButton("📋 CLI LIST")
-        ],
-        # Row 4
-        [
-            KeyboardButton("📈 STATISTICS"),
-            KeyboardButton("🆘 HELP")
-        ],
-        # Bottom single button
+        [KeyboardButton("📊 5 MIN REPORT"), KeyboardButton("📊 10 MIN REPORT")],
+        [KeyboardButton("📊 2 HOURS RESULT"), KeyboardButton("🔍 SINGLE SEARCH")],
+        [KeyboardButton("📈 STATISTICS"), KeyboardButton("🆘 HELP")],
         [KeyboardButton("👑 ADMIN PANEL")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -753,7 +839,7 @@ def get_search_menu(query: str):
     """সার্চ রেজাল্ট মেনু"""
     keyboard = [
         [KeyboardButton(f"📊 5 MIN RESULT - {query}")],
-        [KeyboardButton(f"📊 TOTAL RESULT - {query}")],
+        [KeyboardButton(f"📊 2 HOURS RESULT - {query}")],
         [KeyboardButton("🔙 BACK TO MAIN")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -789,9 +875,7 @@ def is_admin(user_id: str) -> bool:
 
 
 # ====================================================================================================
-# ====================================================================================================
-#                                    第九部分: অটো লুপ
-# ====================================================================================================
+#                                     অটো লুপ
 # ====================================================================================================
 
 async def auto_collection_loop():
@@ -809,9 +893,7 @@ async def auto_collection_loop():
 
 
 # ====================================================================================================
-# ====================================================================================================
-#                                    第十部分: কমান্ড হ্যান্ডলার
-# ====================================================================================================
+#                                     কমান্ড হ্যান্ডলার
 # ====================================================================================================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -824,21 +906,24 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 <b>Live CLI Range Monitor Bot</b>\n\n"
         f"📌 <b>FEATURES:</b>\n"
         f"• Real-time CLI range monitoring\n"
-        f"• Multiple time windows (2m, 5m, 10m)\n"
+        f"• Multiple time windows (2m, 5m, 10m, 2h)\n"
+        f"• Country summary with hit counts\n"
+        f"• CLI count per range\n"
         f"• Single search (CLI or Country)\n"
-        f"• Auto updates every minute\n\n"
+        f"• Auto updates every minute\n"
+        f"• Tap any range name to copy\n\n"
         f"📌 <b>HOW TO USE:</b>\n"
         f"• <b>🟢 ACTIVE RANGE (2 MIN)</b> - Last 2 minutes report\n"
         f"• <b>📊 5 MIN REPORT</b> - Last 5 minutes report\n"
         f"• <b>📊 10 MIN REPORT</b> - Last 10 minutes report\n"
+        f"• <b>📊 2 HOURS RESULT</b> - Last 2 hours report\n"
         f"• <b>🔍 SINGLE SEARCH</b> - Search CLI or Country\n"
         f"• <b>📈 STATISTICS</b> - View bot statistics\n"
-        f"• <b>📋 CLI LIST</b> - Your CLI list\n"
         f"• <b>👑 ADMIN PANEL</b> - Admin features\n\n"
         f"📌 <b>SINGLE SEARCH GUIDE:</b>\n"
         f"1. Click <b>🔍 SINGLE SEARCH</b>\n"
         f"2. Send CLI number (e.g., 5731) OR Country name (e.g., CAMBODIA)\n"
-        f"3. Select <b>5 MIN RESULT</b> or <b>TOTAL RESULT</b>\n\n"
+        f"3. Select <b>5 MIN RESULT</b> or <b>2 HOURS RESULT</b>\n\n"
         f"📌 <b>COMMANDS:</b>\n"
         f"• <b>/start</b> - Restart bot and show this menu\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -849,9 +934,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ====================================================================================================
-# ====================================================================================================
-#                                    第十一部分: মেসেজ হ্যান্ডলার
-# ====================================================================================================
+#                                     মেসেজ হ্যান্ডলার
 # ====================================================================================================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -870,6 +953,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # Admin ADD CLI - শুধু admin চেক করে কোন awaiting_add স্টেট ছাড়া সরাসরি
+    if text == "➕ ADD CLI" and is_admin(user_id):
+        context.user_data['awaiting_add'] = True
+        await update.message.reply_text(
+            "📝 Send CLI number to add:\n\nExample: `5731`\n\nType /cancel to cancel",
+            parse_mode='Markdown',
+            reply_markup=get_admin_menu()
+        )
+        return
+    
+    # Admin REMOVE CLI - শুধু admin চেক করে কোন awaiting_remove স্টেট ছাড়া সরাসরি
+    if text == "➖ REMOVE CLI" and is_admin(user_id):
+        context.user_data['awaiting_remove'] = True
+        await update.message.reply_text(
+            "📝 Send CLI number to remove:\n\nExample: `5731`\n\nType /cancel to cancel",
+            parse_mode='Markdown',
+            reply_markup=get_admin_menu()
+        )
+        return
+    
     if context.user_data.get('awaiting_add'):
         context.user_data['awaiting_add'] = False
         if is_admin(user_id):
@@ -880,8 +983,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"✅ CLI {text} added!\nTotal: {len(UNIQUE_CLI)}", reply_markup=get_admin_menu())
             else:
                 await update.message.reply_text(f"⚠️ CLI {text} already exists!", reply_markup=get_admin_menu())
-        else:
-            await update.message.reply_text("⛔ Admin only!")
         return
     
     if context.user_data.get('awaiting_remove'):
@@ -894,47 +995,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"✅ CLI {text} removed!\nTotal: {len(UNIQUE_CLI)}", reply_markup=get_admin_menu())
             else:
                 await update.message.reply_text(f"⚠️ CLI {text} not found!", reply_markup=get_admin_menu())
-        else:
-            await update.message.reply_text("⛔ Admin only!")
         return
     
-    # MAIN MENU BUTTONS (নতুন ডিজাইন অনুযায়ী)
+    # MAIN MENU BUTTONS
     if text == "🟢 ACTIVE RANGE (2 MIN)":
         await update.message.reply_text("⏳ Fetching 2 minutes report...")
-        await update.message.reply_text(get_report_for_window('2min'), parse_mode='HTML', reply_markup=get_main_menu())
+        result = get_report_for_window('2min')
+        await update.message.reply_text(result, parse_mode='Markdown', reply_markup=get_main_menu())
     
     elif text == "📊 5 MIN REPORT":
         await update.message.reply_text("⏳ Fetching 5 minutes report...")
-        await update.message.reply_text(get_report_for_window('5min'), parse_mode='HTML', reply_markup=get_main_menu())
+        result = get_report_for_window('5min')
+        await update.message.reply_text(result, parse_mode='Markdown', reply_markup=get_main_menu())
     
     elif text == "📊 10 MIN REPORT":
         await update.message.reply_text("⏳ Fetching 10 minutes report...")
-        await update.message.reply_text(get_report_for_window('10min'), parse_mode='HTML', reply_markup=get_main_menu())
+        result = get_report_for_window('10min')
+        await update.message.reply_text(result, parse_mode='Markdown', reply_markup=get_main_menu())
+    
+    elif text == "📊 2 HOURS RESULT":
+        await update.message.reply_text("⏳ Fetching 2 hours report...")
+        result = get_report_for_window('2hours')
+        await update.message.reply_text(result, parse_mode='Markdown', reply_markup=get_main_menu())
     
     elif text == "🔍 SINGLE SEARCH":
         context.user_data['awaiting_search'] = True
         await update.message.reply_text(
             "📝 <b>Send a CLI number OR Country name</b>\n\n"
-            "Examples:\n"
-            "• CLI: 5731\n"
-            "• Country: CAMBODIA, INDIA, IRAQ\n\n"
+            "📌 Examples (Tap to copy):\n"
+            "• `5731`\n"
+            "• `9989`\n"
+            "• `United Kingdom`\n"
+            "• `CAMBODIA`\n\n"
             "After sending, you can select result type.",
-            parse_mode='HTML',
+            parse_mode='Markdown',
             reply_markup=get_main_menu()
         )
     
     elif text == "📈 STATISTICS":
         await update.message.reply_text(get_statistics(), parse_mode='HTML', reply_markup=get_main_menu())
     
-    elif text == "📋 CLI LIST":
-        await update.message.reply_text(get_cli_list_text(), parse_mode='HTML', reply_markup=get_main_menu())
-    
     elif text == "🆘 HELP":
         await update.message.reply_text(get_help_text(), parse_mode='HTML', reply_markup=get_main_menu())
     
     elif text == "👑 ADMIN PANEL":
         if is_admin(user_id):
-            await update.message.reply_text("👑 ADMIN PANEL\n━━━━━━━━━━━━━━━━━━━━\nWelcome Admin!", reply_markup=get_admin_menu())
+            await update.message.reply_text("👑 ADMIN PANEL\n━━━━━━━━━━━━━━━━━━━━\nWelcome Admin!\n\n📌 Available Actions:\n• Add/Remove CLI numbers\n• View all CLIs\n• Force update data", reply_markup=get_admin_menu())
         else:
             await update.message.reply_text("⛔ Access Denied! You are not an admin.", reply_markup=get_main_menu())
     
@@ -946,13 +1052,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = text.replace("📊 5 MIN RESULT - ", "").strip()
         await update.message.reply_text(f"⏳ Fetching 5 minutes result for {query}...")
         five_min, _ = await single_search(query)
-        await update.message.reply_text(five_min, parse_mode='HTML', reply_markup=get_search_menu(query))
+        await update.message.reply_text(five_min, parse_mode='Markdown', reply_markup=get_search_menu(query))
     
-    elif text.startswith("📊 TOTAL RESULT - "):
-        query = text.replace("📊 TOTAL RESULT - ", "").strip()
-        await update.message.reply_text(f"⏳ Fetching total result for {query}...")
+    elif text.startswith("📊 2 HOURS RESULT - "):
+        query = text.replace("📊 2 HOURS RESULT - ", "").strip()
+        await update.message.reply_text(f"⏳ Fetching 2 hours result for {query}...")
         _, total = await single_search(query)
-        await update.message.reply_text(total, parse_mode='HTML', reply_markup=get_search_menu(query))
+        await update.message.reply_text(total, parse_mode='Markdown', reply_markup=get_search_menu(query))
     
     # ADMIN BUTTONS
     elif text == "🔄 FORCE UPDATE":
@@ -960,20 +1066,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("🔄 Force updating data...")
             await collect_all_data()
             await update.message.reply_text("✅ Update complete!", reply_markup=get_admin_menu())
-        else:
-            await update.message.reply_text("⛔ Admin only!")
-    
-    elif text == "➕ ADD CLI":
-        if is_admin(user_id):
-            context.user_data['awaiting_add'] = True
-            await update.message.reply_text("Send CLI number to add:", reply_markup=get_admin_menu())
-        else:
-            await update.message.reply_text("⛔ Admin only!")
-    
-    elif text == "➖ REMOVE CLI":
-        if is_admin(user_id):
-            context.user_data['awaiting_remove'] = True
-            await update.message.reply_text("Send CLI number to remove:", reply_markup=get_admin_menu())
         else:
             await update.message.reply_text("⛔ Admin only!")
     
@@ -988,9 +1080,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ====================================================================================================
-# ====================================================================================================
-#                                    第十二部分: ব্রাউজার সেটআপ
-# ====================================================================================================
+#                                     ব্রাউজার সেটআপ
 # ====================================================================================================
 
 async def init_browser():
@@ -1012,9 +1102,7 @@ async def init_browser():
 
 
 # ====================================================================================================
-# ====================================================================================================
-#                                    第十三部分: মেইন ফাংশন
-# ====================================================================================================
+#                                     মেইন ফাংশন
 # ====================================================================================================
 
 async def main():
@@ -1025,8 +1113,10 @@ async def main():
     print("=" * 70)
     print(f"📧 Email: {ORANGE_EMAIL}")
     print(f"📋 Total CLIs: {len(UNIQUE_CLI)}")
-    print(f"⏱️ Windows: 2min, 5min, 10min")
+    print(f"⏱️ Windows: 2min, 5min, 10min, 2hours")
     print(f"🔍 Single Search: CLI or Country")
+    print(f"📊 Country Summary: ENABLED")
+    print(f"📋 Copy Range: ENABLED")
     print(f"🔄 Data collection: Every {UPDATE_INTERVAL} seconds")
     print("=" * 70 + "\n")
     
@@ -1074,8 +1164,9 @@ async def main():
     await send_msg(
         "✅ ORANGE CLI BOT ONLINE!\n\n"
         f"📋 CLIs: {len(UNIQUE_CLI)}\n"
-        f"⏱️ Windows: 2min, 5min, 10min\n"
-        f"🔍 Single Search: CLI or Country\n"
+        f"⏱️ Windows: 2min, 5min, 10min, 2hours\n"
+        f"📊 Country Summary: ENABLED\n"
+        f"📋 Copy Range: Tap any range name to copy\n"
         f"🔄 Data collection: Every {UPDATE_INTERVAL} seconds\n\n"
         "Type /start to see the menu",
         get_main_menu()
@@ -1104,3 +1195,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n👋 Stopped")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        sys.exit(1)
